@@ -1,0 +1,113 @@
+// Databricks notebook source
+//|Read The data
+val ratings = sqlContext.sql("SELECT * FROM ratings")
+display(ratings.select("*"))
+
+// COMMAND ----------
+
+val movies = sqlContext.sql("SELECT * FROM movies")
+display(movies.select("*"))
+
+// COMMAND ----------
+
+val data = sqlContext.sql("SELECT * FROM data")
+display(data.select("*"))
+
+// COMMAND ----------
+
+val user = sqlContext.sql("SELECT * FROM user")
+display(ratings.select("*"))
+
+// COMMAND ----------
+
+import org.apache.spark.mllib.recommendation.ALS  
+import org.apache.spark.mllib.recommendation.Rating  
+val ratings = data.map { case Array(user, movie, rating) =>
+     | Rating(user.toInt, movie.toInt, rating.toDouble) }
+
+// COMMAND ----------
+
+val rawRatings = data()
+import org.apache.spark.mllib.recommendation.ALS
+
+// COMMAND ----------
+
+import org.apache.spark.mllib.recommendation.Rating
+
+val sc = new SparkContext("local[2]", "First Spark App")
+sc.setLogLevel("ERROR")
+val rawData = sc.textFile("data")
+val rawRatings = rawData.map(_.split("\t").take(3))
+val ratings = rawRatings.map {case Array(user, movie, rating) 
+=> Rating(user.toInt, movie.toInt, rating.toDouble)}
+
+// COMMAND ----------
+
+import org.apache.spark.mllib.recommendation.ALS
+
+val model = ALS.train(ratings, 50, 10, 0.01)
+println(model.userFeatures.count)
+println(model.userFeatures.take(1))
+println(model.predict(196, 242))
+
+// COMMAND ----------
+
+val userId = 789
+val K = 5	
+val topKRecs = model.recommendProducts(userId, K)
+println(topKRecs.mkString("\n"))
+
+// COMMAND ----------
+
+val movies = sc.textFile("data/u.item")
+val titles = movies.map(line => line.split("\\|")).map(fields => (fields(0).toInt, fields(1))).collectAsMap()
+val moviesForUser = ratings.keyBy(_.user).lookup(789)
+println("User " + userId +"'s favorite movies:")
+moviesForUser.sortBy(-_.rating).take(5).map(rating => (titles(rating.product), rating.rating)).foreach(println)
+println("Movies recommended to user " + userId)
+topKRecs.map(rating => (titles(rating.product), rating.rating)).foreach(println)
+
+// COMMAND ----------
+
+import org.jblas.DoubleMatrix
+def cosineSimilarity(vec1: DoubleMatrix, vec2: DoubleMatrix): Double = {
+  vec1.dot(vec2) / (vec1.norm2() * vec2.norm2())
+}
+val itemId = 567
+val itemFactor = model.productFeatures.lookup(itemId).head
+val itemVector = new DoubleMatrix(itemFactor)
+val sims = model.productFeatures.map {case (id, factor) =>
+  val factorVector = new DoubleMatrix(factor)
+  val sim = cosineSimilarity(factorVector, itemVector)
+  (id, sim)
+}
+val sortedSims = sims.top(K)(Ordering.by[(Int, Double), Double] {case (id, similarity) => similarity})
+println(sortedSims.mkString("\n"))
+
+// COMMAND ----------
+
+println("Item number " + itemId + "'s name:")
+println(titles(itemId))
+println("Names of similar movies:")
+println(sortedSims.map {case (id, similarity) => (titles(id), similarity)}.mkString("\n"))
+
+// COMMAND ----------
+
+val usersProducts = ratings.map {case Rating(user, product, rating) => (user, product)}
+val predictions = model.predict(usersProducts).map {case Rating(user, product, rating) => ((user, product), rating)}
+val ratingsAndPredictions = ratings.map {case Rating(user, product, rating) =>
+      ((user, product), rating)}.join(predictions)
+val MSE = ratingsAndPredictions.map {
+      case ((user, product), (actual, predicted)) => math.pow((actual - predicted), 2)
+      }.reduce((x, y) => x + y) / ratingsAndPredictions.count
+println("MSE = " + MSE)
+println("RMSE = " + math.sqrt(MSE))
+
+// COMMAND ----------
+
+import org.apache.spark.mllib.evaluation.RegressionMetrics
+val predictedAndTrue = ratingsAndPredictions.map {
+      case ((user, product), (actual, predicted)) => (actual, predicted)}
+val regressionMetrics = new RegressionMetrics(predictedAndTrue)
+println("MLlib MSE = " + regressionMetrics.meanSquaredError)
+println("MLlib RMSE = " + regressionMetrics.rootMeanSquaredError)
